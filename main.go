@@ -14,17 +14,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
-const maxUploadSize = 2 * 1024 * 1024 // 2 mb
+const maxUploadSize = 10 * 1024 * 1024 // 10 mb
 const uploadPath = "./demo"
 const downloadFileFromPath = "demo/"
 const destination = "test/download/"
 
 func main() {
 	http.HandleFunc("/upload", uploadFileHandler())
-
-	//	fs := http.FileServer(http.Dir(uploadPath))
+	http.HandleFunc("/", uploadHandler)
 	http.HandleFunc("/files/", downloadFiles()) //http.StripPrefix("/files", fs)
 
 	log.Print("Server started on localhost:8080, use /upload for uploading files and /files/{fileName} for downloading")
@@ -84,6 +84,14 @@ func uploadFileHandler() http.HandlerFunc {
 		}
 		newPath := filepath.Join(uploadPath, fileName+fileEndings[0])
 		fmt.Printf("FileType: %s, File: %s\n", detectedFileType, newPath)
+
+		// Create the uploads folder if it doesn't
+		// already exist
+		err = os.MkdirAll(uploadPath, os.ModePerm)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 
 		// write file
 		newFile, err := os.Create(newPath)
@@ -169,4 +177,111 @@ func respondWithJson(w http.ResponseWriter, code int, payload interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	w.Write(response)
+}
+
+// Progress is used to track the progress of a file upload.
+// It implements the io.Writer interface so it can be passed
+// to an io.TeeReader()
+type Progress struct {
+	TotalSize int64
+	BytesRead int64
+}
+
+// Write is used to satisfy the io.Writer interface.
+// Instead of writing somewhere, it simply aggregates
+// the total bytes on each read
+func (pr *Progress) Write(p []byte) (n int, err error) {
+	n, err = len(p), nil
+	pr.BytesRead += int64(n)
+	pr.Print()
+	return
+}
+
+// Print displays the current progress of the file upload
+// each time Write is called
+func (pr *Progress) Print() {
+	if pr.BytesRead == pr.TotalSize {
+		fmt.Println("DONE!")
+		return
+	}
+
+	fmt.Printf("File upload in progress: %d\n", pr.BytesRead)
+}
+
+func uploadHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// 32 MB is the default used by FormFile()
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Get a reference to the fileHeaders.
+	// They are accessible only after ParseMultipartForm is called
+	files := r.MultipartForm.File["file"]
+
+	for _, fileHeader := range files {
+		// Restrict the size of each uploaded file given size.
+		// To prevent the aggregate size from exceeding
+		// a specified value, use the http.MaxBytesReader() method
+		// before calling ParseMultipartForm()
+		if fileHeader.Size > maxUploadSize {
+			http.Error(w, fmt.Sprintf("The uploaded image is too big: %s. Please use an image less than 1MB in size", fileHeader.Filename), http.StatusBadRequest)
+			return
+		}
+
+		// Open the file
+		file, err := fileHeader.Open()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		defer file.Close()
+
+		buff := make([]byte, 512)
+		_, err = file.Read(buff)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		//filetype := http.DetectContentType(buff)
+		// if filetype != "image/jpeg" && filetype != "image/png" {
+		// 	http.Error(w, "The provided file format is not allowed. Please upload a JPEG or PNG image", http.StatusBadRequest)
+		// 	return
+		// }
+
+		_, err = file.Seek(0, io.SeekStart)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		err = os.MkdirAll("./uploads", os.ModePerm)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		f, err := os.Create(fmt.Sprintf("./uploads/%d%s", time.Now().UnixNano(), filepath.Ext(fileHeader.Filename)))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		defer f.Close()
+
+		_, err = io.Copy(f, file)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
+	fmt.Fprintf(w, "Upload successful")
 }
