@@ -24,8 +24,9 @@ const destination = "test/download/"
 
 func main() {
 	http.HandleFunc("/upload", uploadFileHandler())
-	http.HandleFunc("/", uploadHandler)
+	http.HandleFunc("/upload-multipleFile", uploadHandler)
 	http.HandleFunc("/files/", downloadFiles()) //http.StripPrefix("/files", fs)
+	http.HandleFunc("/", downloadFile())
 
 	log.Print("Server started on localhost:8080, use /upload for uploading files and /files/{fileName} for downloading")
 	log.Fatal(http.ListenAndServe(":8080", nil))
@@ -284,4 +285,49 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fmt.Fprintf(w, "Upload successful")
+}
+
+func downloadFile() http.HandlerFunc {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		if r.Method != "GET" {
+			renderError(w, "Method not allowed", http.StatusInternalServerError)
+			return
+		}
+
+		segments := strings.Split(r.URL.Path, "/")
+		fileName = segments[len(segments)-1]
+		fullURLFile = strings.Replace(r.URL.Path, fileName, "", 1)
+
+		// Build fileName from fullPath
+		_, err := url.Parse(fullURLFile)
+		if err != nil {
+			log.Fatal(err)
+			renderError(w, "Path_Not_Available", http.StatusInternalServerError)
+			return
+		}
+		fullURLFile = fullURLFile + fileName
+		fileName = destination + fileName
+		// Create blank file
+		file, err := os.Create(fileName)
+		if err != nil {
+			log.Println(err)
+			renderError(w, "Unable_To_Create_File", http.StatusInternalServerError)
+			file.Close()
+			return
+		}
+
+		fullURLFile = strings.Replace(fullURLFile, "/", "", 1)
+		resp, err := os.Open(fullURLFile)
+		if err != nil {
+			log.Println(err)
+			renderError(w, "File_Not_Available", http.StatusInternalServerError)
+			return
+		}
+		defer resp.Close()
+		size, err := io.Copy(file, resp)
+		defer file.Close()
+		fmt.Printf("Downloaded a file %s with size %d", fileName, size)
+		respondWithJson(w, http.StatusOK, "Downloaded Successfully")
+	})
 }
